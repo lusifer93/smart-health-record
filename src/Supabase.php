@@ -14,6 +14,13 @@ final class Supabase {
         curl_setopt_array($ch, [CURLOPT_CUSTOMREQUEST => $method, CURLOPT_HTTPHEADER => $headers, CURLOPT_RETURNTRANSFER => true, CURLOPT_TIMEOUT => 25]);
         $raw = curl_exec($ch); $code = (int) curl_getinfo($ch, CURLINFO_RESPONSE_CODE); $error = curl_error($ch); curl_close($ch);
         $data = $raw !== false && $raw !== '' ? json_decode($raw, true) : null;
+        if ($code === 401 && $token && function_exists('sign_out')) {
+            sign_out();
+            if (function_exists('flash') && function_exists('redirect')) {
+                flash('warning', 'Your session expired. Please sign in again.');
+                redirect('?page=login');
+            }
+        }
         if ($raw === false || $code >= 400) throw new RuntimeException(($data['message'] ?? $data['error_description'] ?? $data['msg'] ?? $error ?: 'Supabase request failed') . " (HTTP $code)");
         return is_array($data) ? $data : [];
     }
@@ -28,8 +35,10 @@ final class Supabase {
         if ($raw === false || $code >= 400) throw new RuntimeException('File upload failed: ' . $error . " (HTTP $code)");
         return json_decode($raw ?: '[]', true) ?: [];
     }
-    public function signedFileUrl(string $path): string {
-        $r = $this->request('POST', '/storage/v1/object/sign/' . rawurlencode(env('SUPABASE_STORAGE_BUCKET', 'medical-records')) . '/' . str_replace('%2F', '/', rawurlencode($path)), ['expiresIn' => 300], auth_token());
+    public function signedFileUrl(string $path, bool $download = false): string {
+        $payload = ['expiresIn' => 300];
+        if ($download) $payload['download'] = true;
+        $r = $this->request('POST', '/storage/v1/object/sign/' . rawurlencode(env('SUPABASE_STORAGE_BUCKET', 'medical-records')) . '/' . str_replace('%2F', '/', rawurlencode($path)), $payload, auth_token());
         return $this->url . '/storage/v1' . ($r['signedURL'] ?? throw new RuntimeException('Could not create download link.'));
     }
 }

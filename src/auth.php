@@ -28,6 +28,11 @@ function profile(bool $refresh = false): ?array {
     if (!auth_token() || !user()) return null;
     $rows = (new Supabase())->db('GET', 'profiles', '?select=*&id=eq.' . rawurlencode((string)user()['id']) . '&limit=1');
     $_SESSION['profile'] = $rows[0] ?? null;
+    if (($_SESSION['profile']['account_status'] ?? 'active') === 'suspended') {
+        sign_out();
+        flash('warning', 'This account is suspended. Please contact the CareNest administrator.');
+        redirect('?page=login');
+    }
     return $_SESSION['profile'];
 }
 

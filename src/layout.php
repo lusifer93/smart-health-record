@@ -59,5 +59,7 @@ function foot(): void
 {
     $account = user();
     echo $account ? '</main></div>' : '</main>';
-    echo '<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script></body></html>';
+    echo '<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>';
+    if (!$account) echo '<script>if(new URLSearchParams(location.search).get("page")==="login"){const links=document.querySelector(".auth-panel .d-flex");if(links&&!document.getElementById("admin-login-link")){const a=document.createElement("a");a.id="admin-login-link";a.className="text-decoration-none";a.href="?page=login&role=admin";a.textContent="Admin login →";links.appendChild(a);}}</script>';
+    echo '</body></html>';
 }

@@ -35,6 +35,21 @@
 - Add shared-record summary sections using only consented database data.
 - Add notification queries and actions once the notification workflow is enabled.
 
+## Completed — Appointment and notification foundation
+
+- Applied `database/appointments-and-notifications-migration.sql` to Supabase.
+- Patients can request a future appointment only with a verified doctor; requests are stored as `pending`.
+- Doctors can confirm, propose a different time, or decline through a secure database function.
+- Both sides receive database-backed in-app notifications after an appointment action.
+- Expired Supabase sessions now sign out safely with a friendly message rather than exposing an error.
+
+## Ready to apply — Administrator governance
+
+- Added a separate `/index.php?page=login&role=admin` entry and server-side administrator routing.
+- Added administrator dashboard pages for verification, users, appointment metadata, announcements, audit history and CSV exports.
+- Added suspension enforcement, administrator self-protection, audit logging and secure notification functions in `database/admin-governance-migration.sql`.
+- The new migration must be run manually after the two earlier administrator/appointment migrations.
+
 ## Required configuration
 
 - `OPENAI_API_KEY` is empty in `.env`; AI prescription analysis remains deliberately unavailable.
