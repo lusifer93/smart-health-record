@@ -20,6 +20,7 @@ final class Supabase {
     public function auth(string $method, string $path, ?array $body = null): array { return $this->request($method, '/auth/v1' . $path, $body, null, ['Content-Type: application/json']); }
     public function authUser(string $method, string $path, ?array $body = null): array { return $this->request($method, '/auth/v1' . $path, $body, auth_token(), ['Content-Type: application/json']); }
     public function db(string $method, string $table, string $query = '', ?array $body = null): array { return $this->request($method, '/rest/v1/' . $table . $query, $body, auth_token(), ['Prefer: return=representation']); }
+    public function rpc(string $name, array $body = []): array { return $this->request('POST', '/rest/v1/rpc/'.$name, $body, auth_token(), ['Content-Type: application/json']); }
     public function storageUpload(string $path, string $contents, string $mime): array {
         $url = $this->url . '/storage/v1/object/' . rawurlencode(env('SUPABASE_STORAGE_BUCKET', 'medical-records')) . '/' . str_replace('%2F', '/', rawurlencode($path));
         $ch = curl_init($url); curl_setopt_array($ch, [CURLOPT_POST => true, CURLOPT_POSTFIELDS => $contents, CURLOPT_RETURNTRANSFER => true, CURLOPT_TIMEOUT => 45, CURLOPT_HTTPHEADER => ['apikey: ' . $this->key, 'Authorization: Bearer ' . auth_token(), 'Content-Type: ' . $mime, 'x-upsert: false']]);
