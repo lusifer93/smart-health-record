@@ -36,9 +36,23 @@ try {
         if ($form === 'metric') { $sb->db('POST','health_metrics','', [['patient_id'=>$uid,'metric_type'=>trim($_POST['metric_type']),'value'=>(float)$_POST['value'],'unit'=>trim($_POST['unit']),'measured_at'=>date('c'),'notes'=>trim($_POST['notes'])]]); flash('success','Health metric saved.'); }
         if ($form === 'medicine') { $sb->db('POST','medicines','', [['patient_id'=>$uid,'name'=>trim($_POST['name']),'dosage'=>trim($_POST['dosage']),'frequency'=>trim($_POST['frequency']),'start_date'=>$_POST['start_date'] ?: null,'reminder_time'=>$_POST['reminder_time'] ?: null,'notes'=>trim($_POST['notes'])]]); flash('success','Medicine added.'); }
         if ($form === 'medicine_create') { $sb->db('POST','medicines','', [array_merge(['patient_id'=>$uid], medicine_fields($_POST))]); flash('success','Medicine added to your plan.'); }
-        if ($form === 'medicine_update') { $id=(string)($_POST['id'] ?? ''); if(!ctype_digit($id)) throw new RuntimeException('Invalid medicine selected.'); $sb->db('PATCH','medicines','?id=eq.'.rawurlencode($id).'&patient_id=eq.'.rawurlencode($uid), medicine_fields($_POST)); flash('success','Medicine updated.'); }
-        if ($form === 'medicine_delete') { $id=(string)($_POST['id'] ?? ''); if(!ctype_digit($id)) throw new RuntimeException('Invalid medicine selected.'); $sb->db('DELETE','medicines','?id=eq.'.rawurlencode($id).'&patient_id=eq.'.rawurlencode($uid)); flash('success','Medicine removed from your plan.'); }
-        if ($form === 'appointment') { $sb->db('POST','appointments','', [['patient_id'=>$uid,'scheduled_at'=>date('c',strtotime($_POST['scheduled_at'])),'reason'=>trim($_POST['reason'])]]); flash('success','Appointment saved.'); }
+        if ($form === 'medicine_update') {
+    $id=(string)($_POST['id'] ?? '');
+    if (!preg_match('/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i', $id)) {
+        throw new RuntimeException('Invalid medicine selected.');
+    }
+    $sb->db('PATCH','medicines','?id=eq.'.rawurlencode($id).'&patient_id=eq.'.rawurlencode($uid), medicine_fields($_POST));
+    flash('success','Medicine updated.');
+}
+
+if ($form === 'medicine_delete') {
+    $id=(string)($_POST['id'] ?? '');
+    if (!preg_match('/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i', $id)) {
+        throw new RuntimeException('Invalid medicine selected.');
+    }
+    $sb->db('DELETE','medicines','?id=eq.'.rawurlencode($id).'&patient_id=eq.'.rawurlencode($uid));
+    flash('success','Medicine removed from your plan.');
+}        if ($form === 'appointment') { $sb->db('POST','appointments','', [['patient_id'=>$uid,'scheduled_at'=>date('c',strtotime($_POST['scheduled_at'])),'reason'=>trim($_POST['reason'])]]); flash('success','Appointment saved.'); }
         if ($form === 'record') { $upload=validated_medical_upload($_FILES['file'] ?? []); $path=$uid.'/'.bin2hex(random_bytes(16)).'.'.$upload['extension']; $sb->storageUpload($path, (string)file_get_contents($upload['tmp_name']), $upload['mime']); $sb->db('POST','medical_records','', [['patient_id'=>$uid,'title'=>trim($_POST['title']) ?: $upload['display_name'],'file_path'=>$path,'file_type'=>$upload['mime']]]); flash('success','Medical record uploaded.'); }
         if ($form === 'prescription_scan') { if (empty($_FILES['prescription']['tmp_name']) || $_FILES['prescription']['error'] !== UPLOAD_ERR_OK) throw new RuntimeException('Choose a clear prescription image.'); $mime=$_FILES['prescription']['type'] ?: ''; if (!in_array($mime,['image/jpeg','image/png','image/webp'],true)) throw new RuntimeException('For prescription scan, upload a JPG, PNG or WEBP image.'); $items=extract_prescription((string)file_get_contents($_FILES['prescription']['tmp_name']),$mime); foreach($items as $item) $sb->db('POST','medicines','', [['patient_id'=>$uid,'medicine_name'=>$item['name'],'dosage'=>$item['dosage'],'frequency'=>$item['frequency'],'notes'=>'Extracted from prescription — please verify with your clinician.']]); flash('success',count($items).' medicine(s) extracted. Please check every name and dose before relying on it.'); }
         if ($form === 'share') { $doctors = $sb->db('GET','profiles','?select=id,role&email=eq.' . rawurlencode(trim($_POST['doctor_email']))); if (!$doctors || $doctors[0]['role'] !== 'doctor') throw new RuntimeException('No authorised doctor profile was found for that email.'); $sb->db('POST','record_sharing','?on_conflict=patient_id,doctor_id', [['patient_id'=>$uid,'doctor_id'=>$doctors[0]['id'],'expires_at'=>$_POST['expires_at'] ? date('c',strtotime($_POST['expires_at'])) : null]]); flash('success','Access shared with the doctor.'); }
