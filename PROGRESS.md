@@ -1,4 +1,3 @@
-
 # CareNest implementation progress
 
 ## Completed
@@ -22,11 +21,19 @@
 - Applied `database/admin-verification-migration.sql`: only an admin can use the verification function; browser clients cannot update `role` or verification fields directly.
 - No account was promoted to admin automatically.
 
-## Current phase — Appointment and notifications
+## Completed — GUI redesign foundation
 
-- Add notification/appointment workflow.
-- Add scheduled, database-backed medicine reminders.
-- Improve prescription document/AI analysis after `OPENAI_API_KEY` is configured server-side.
+- Added a responsive Bootstrap 5 application shell with a compact sidebar and sticky top header.
+- Added Bootstrap Icons, profile dropdown, notification affordance, responsive mobile navigation and consistent design tokens.
+- Added distinct patient, doctor and administrator color themes.
+- Added shared card, form, button, badge, table, alert and empty-state styling without changing business logic.
+
+## Current phase — GUI page refinement and real-data dashboard sections
+
+- Refine patient and doctor dashboards to use the shared shell with compact real-data cards.
+- Add friendly empty states and responsive table wrappers to remaining views.
+- Add shared-record summary sections using only consented database data.
+- Add notification queries and actions once the notification workflow is enabled.
 
 ## Required configuration
 
