@@ -1,25 +1,84 @@
 <?php
 declare(strict_types=1);
+
 function require_admin(): void { require_role('admin'); }
-function admin_h(mixed $v): string { return htmlspecialchars((string)($v ?? ''),ENT_QUOTES,'UTF-8'); }
+
+function admin_status_class(string $status): string {
+    return match ($status) {
+        'verified' => 'status-verified',
+        'rejected' => 'status-rejected',
+        'under_review' => 'status-review',
+        default => 'status-pending',
+    };
+}
+
 function admin_portal(): void {
- require_admin(); $sb=new Supabase(); $page=(string)($_GET['page']??'admin_dashboard'); $adminId=(string)user()['id'];
- $tabs=['admin_dashboard'=>'Overview','admin_verification'=>'Doctor verification','admin_users'=>'Users','admin_appointments'=>'Appointments','admin_announcements'=>'Announcements','admin_audit'=>'Audit log','admin_export'=>'Exports']; if(!isset($tabs[$page]))$page='admin_dashboard';
- if($_SERVER['REQUEST_METHOD']==='POST'){try{$form=(string)($_POST['form']??'');
-  if($form==='review_doctor'){$id=(string)($_POST['doctor_id']??'');if(!preg_match('/^[0-9a-f-]{36}$/i',$id))throw new RuntimeException('Invalid doctor selected.');$sb->rpc('carenest_set_doctor_verification',['target_doctor'=>$id,'next_status'=>(string)$_POST['verification_status'],'review_reason'=>trim((string)$_POST['verification_reason'])]);flash('success','Verification updated and the doctor was notified.');}
-  elseif($form==='account_status'){$id=(string)($_POST['user_id']??'');if(!preg_match('/^[0-9a-f-]{36}$/i',$id))throw new RuntimeException('Invalid user selected.');$sb->rpc('carenest_set_account_status',['target_user'=>$id,'next_status'=>(string)$_POST['account_status'],'reason'=>trim((string)$_POST['reason'])]);flash('success','Account status updated.');}
-  elseif($form==='announcement'){$target=trim((string)($_POST['target_user']??''));$sb->rpc('carenest_admin_announcement',['target_user'=>$target===''?null:$target,'audience'=>(string)$_POST['audience'],'announcement_title'=>trim((string)$_POST['title']),'announcement_body'=>trim((string)$_POST['body'])]);flash('success','In-app announcement sent.');}
- }catch(Throwable $e){flash('danger',safe_error_message($e));}redirect('?page='.urlencode($_POST['return_page']??$page));}
- if($page==='admin_export'){$kind=(string)($_GET['kind']??'users');$rows=$kind==='appointments'?$sb->db('GET','appointments','?select=id,patient_id,doctor_id,status,scheduled_at,reason,created_at&order=created_at.desc'):$sb->db('GET','profiles','?select=id,full_name,email,role,account_status,verification_status,created_at&order=created_at.desc');$sb->rpc('carenest_audit',['event_action'=>'export_'.$kind,'target_kind'=>'export','target_value'=>null,'event_details'=>['rows'=>count($rows)]]);header('Content-Type: text/csv; charset=utf-8');header('Content-Disposition: attachment; filename="carenest-'.$kind.'-'.date('Ymd').'.csv"');$o=fopen('php://output','w');if($rows){fputcsv($o,array_keys($rows[0]));foreach($rows as $row)fputcsv($o,$row);}fclose($o);exit;}
- try { $profiles=$sb->db('GET','profiles','?select=id,full_name,email,role,account_status,verification_status,verification_reason,credential_path,created_at&order=created_at.desc'); }
- catch(Throwable $e) { flash('warning','Administrator features are being set up. Run the administrator governance migration in Supabase, then sign in again.'); redirect('?page=login&role=admin'); }
- $doctors=array_values(array_filter($profiles,fn($p)=>($p['role']??'')==='doctor'));head('Administrator · '.$tabs[$page]); ?>
-<div class="admin-shell"><div class="d-flex justify-content-between align-items-center mb-4"><div><span class="eyebrow">Restricted area</span><h1 class="h3 mb-0">CareNest administration</h1></div><span class="role-chip">Administrator only</span></div><nav class="nav nav-pills gap-2 mb-4"><?php foreach($tabs as $k=>$label): ?><a class="nav-link <?=$page===$k?'active':''?>" href="?page=<?=$k?>"><?=admin_h($label)?></a><?php endforeach ?></nav>
-<?php if($page==='admin_dashboard'): $a=$sb->db('GET','appointments','?select=id,status&limit=1000');$r=$sb->db('GET','medical_records','?select=id&limit=1000');$verified=count(array_filter($doctors,fn($d)=>($d['verification_status']??'')==='verified'));?><div class="row g-3"><div class="col-md-3"><div class="card p-3"><small>Patients</small><div class="metric"><?=count(array_filter($profiles,fn($p)=>($p['role']??'')==='patient'))?></div></div></div><div class="col-md-3"><div class="card p-3"><small>Doctors</small><div class="metric"><?=count($doctors)?></div><small><?=$verified?> verified</small></div></div><div class="col-md-3"><div class="card p-3"><small>Appointments</small><div class="metric"><?=count($a)?></div></div></div><div class="col-md-3"><div class="card p-3"><small>Record uploads</small><div class="metric"><?=count($r)?></div></div></div></div>
-<?php elseif($page==='admin_verification'): ?><div class="card p-4"><h2 class="h5">Doctor verification</h2><?php if(!$doctors): ?><p class="text-muted">No doctor profiles yet.</p><?php endif;foreach($doctors as $d):?><div class="border rounded-4 p-3 mb-3"><strong><?=admin_h($d['full_name'])?></strong><div class="small text-muted"><?=admin_h($d['email'])?> · <?=admin_h($d['verification_status']??'verification_required')?></div><?php if(!empty($d['credential_path'])):?><a class="small" href="?action=credential_download&doctor_id=<?=urlencode($d['id'])?>">Open credential document</a><?php endif?><form method="post" class="row g-2 mt-2"><input type="hidden" name="form" value="review_doctor"><input type="hidden" name="return_page" value="admin_verification"><input type="hidden" name="doctor_id" value="<?=admin_h($d['id'])?>"><div class="col-md-3"><select class="form-select form-select-sm" name="verification_status"><?php foreach(['verification_required','pending','under_review','verified','rejected'] as $s):?><option <?=$s===($d['verification_status']??'')?'selected':''?>><?=admin_h(str_replace('_',' ',$s))?></option><?php endforeach?></select></div><div class="col-md-6"><input class="form-control form-control-sm" name="verification_reason" placeholder="Reason" value="<?=admin_h($d['verification_reason'])?>"></div><div class="col-md-3"><button class="btn btn-sm btn-primary w-100">Confirm change</button></div></form></div><?php endforeach?></div>
-<?php elseif($page==='admin_users'): ?><div class="card p-4"><h2 class="h5">User management</h2><div class="table-responsive"><table class="table"><thead><tr><th>User</th><th>Role</th><th>Status</th><th>Action</th></tr></thead><tbody><?php foreach($profiles as $p):?><tr><td><?=admin_h($p['full_name'])?><div class="small text-muted"><?=admin_h($p['email'])?></div></td><td><?=admin_h($p['role'])?></td><td><?=admin_h($p['account_status']??'active')?></td><td><?php if($p['id']!==$adminId):?><form method="post" class="d-flex gap-2"><input type="hidden" name="form" value="account_status"><input type="hidden" name="return_page" value="admin_users"><input type="hidden" name="user_id" value="<?=admin_h($p['id'])?>"><input type="hidden" name="account_status" value="<?=($p['account_status']??'active')==='suspended'?'active':'suspended'?>"><input class="form-control form-control-sm" name="reason" placeholder="Reason"><button class="btn btn-sm btn-outline-primary"><?=($p['account_status']??'active')==='suspended'?'Reactivate':'Suspend'?></button></form><?php else:?><span class="small text-muted">Your account</span><?php endif?></td></tr><?php endforeach?></tbody></table></div></div>
-<?php elseif($page==='admin_appointments'): $items=$sb->db('GET','appointments','?select=id,patient_id,doctor_id,status,scheduled_at,reason,created_at&order=created_at.desc&limit=200');?><div class="card p-4"><h2 class="h5">Appointment oversight</h2><div class="table-responsive"><table class="table"><thead><tr><th>Status</th><th>When</th><th>Patient</th><th>Doctor</th><th>Reason</th></tr></thead><tbody><?php foreach($items as $i):?><tr><td><?=admin_h($i['status'])?></td><td><?=admin_h($i['scheduled_at'])?></td><td><?=admin_h($i['patient_id'])?></td><td><?=admin_h($i['doctor_id'])?></td><td><?=admin_h($i['reason'])?></td></tr><?php endforeach?></tbody></table></div></div>
-<?php elseif($page==='admin_announcements'):?><div class="card p-4"><h2 class="h5">In-app announcement</h2><form method="post" class="row g-3"><input type="hidden" name="form" value="announcement"><input type="hidden" name="return_page" value="admin_announcements"><div class="col-md-4"><select class="form-select" name="audience"><option value="patients">All patients</option><option value="doctors">All doctors</option><option value="specific">Specific user ID</option></select></div><div class="col-md-8"><input class="form-control" name="target_user" placeholder="User UUID for a specific user"></div><div class="col-md-6"><input class="form-control" name="title" placeholder="Title" required></div><div class="col-md-6"><input class="form-control" name="body" placeholder="Message" required></div><div><button class="btn btn-primary">Confirm and send</button></div></form></div>
-<?php elseif($page==='admin_audit'): $logs=$sb->db('GET','audit_logs','?select=*&order=created_at.desc&limit=200');?><div class="card p-4"><h2 class="h5">Audit log</h2><?php if(!$logs):?><p class="text-muted">No admin actions recorded yet.</p><?php endif;foreach($logs as $l):?><div class="border-bottom py-2"><strong><?=admin_h($l['action'])?></strong><span class="small text-muted"> <?=admin_h($l['target_type'])?> · <?=admin_h($l['target_id'])?> · <?=admin_h($l['created_at'])?></span></div><?php endforeach?></div>
-<?php else:?><div class="card p-4"><h2 class="h5">CSV exports</h2><p class="text-muted">Administrative data only; medical content is never included.</p><a class="btn btn-outline-primary me-2" href="?page=admin_export&kind=users">Users CSV</a><a class="btn btn-outline-primary" href="?page=admin_export&kind=appointments">Appointments CSV</a></div><?php endif?></div><?php foot();
+    require_admin();
+    $sb = new Supabase();
+    $page = (string)($_GET['page'] ?? 'admin_dashboard');
+
+    if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['form'] ?? '') === 'review_doctor') {
+        try {
+            $doctorId = (string)($_POST['doctor_id'] ?? '');
+            $status = (string)($_POST['verification_status'] ?? '');
+            if (!preg_match('/^[0-9a-f-]{36}$/i', $doctorId)) {
+                throw new RuntimeException('Invalid doctor selected.');
+            }
+            if (!in_array($status, ['pending', 'under_review', 'verified', 'rejected'], true)) {
+                throw new RuntimeException('Invalid verification status.');
+            }
+            $sb->rpc('carenest_set_doctor_verification', [
+                'target_doctor' => $doctorId,
+                'next_status' => $status,
+                'review_reason' => trim((string)($_POST['verification_reason'] ?? '')),
+            ]);
+            flash('success', 'Doctor verification status updated.');
+        } catch (Throwable $e) {
+            flash('danger', safe_error_message($e));
+        }
+        redirect('?page=admin_verification');
+    }
+
+    $tabs = ['admin_dashboard' => 'Overview', 'admin_verification' => 'Doctor verification'];
+    if (!isset($tabs[$page])) $page = 'admin_dashboard';
+
+    $doctors = $sb->db(
+        'GET',
+        'profiles',
+        '?select=id,full_name,email,phone,address,specialization,specialization_other,clinic_name,qualification,license_number,credential_path,credential_document_type,credential_number,issuing_institution,verification_status,verification_reason,verification_updated_at&role=eq.doctor&order=created_at.desc'
+    );
+
+    head('Administrator · ' . $tabs[$page]); ?>
+<style>
+.admin-shell{max-width:1180px;margin:auto}.admin-nav{display:flex;gap:.5rem;flex-wrap:wrap;margin-bottom:1.5rem}.admin-nav a{padding:.55rem .85rem;border-radius:10px;background:#fff;color:#173044;text-decoration:none;border:1px solid #d8e8e4}.admin-nav a.active{background:#173044;color:#fff}.doctor-review-card{border:1px solid #d8e8e4;border-radius:16px;background:#fff;padding:1.25rem;margin-bottom:1rem}.doctor-detail{background:#f5faf8;border-radius:12px;padding:1rem}.doctor-detail dt{font-size:.72rem;text-transform:uppercase;color:#6b7c85;font-weight:700}.doctor-detail dd{margin-bottom:.75rem}.status-verified{color:#147a50;font-weight:700}.status-pending{color:#9a6400;font-weight:700}.status-review{color:#1769aa;font-weight:700}.status-rejected{color:#b42318;font-weight:700}
+</style>
+<div class="admin-shell">
+  <div class="d-flex justify-content-between align-items-center mb-3">
+    <div><span class="eyebrow">Restricted area</span><h1 class="h3 mb-0">CareNest administration</h1></div>
+    <a class="btn btn-sm btn-outline-primary" href="?action=logout">Sign out</a>
+  </div>
+  <nav class="admin-nav"><?php foreach ($tabs as $key => $label): ?><a class="<?=$page === $key ? 'active' : ''?>" href="?page=<?=$key?>"><?=h($label)?></a><?php endforeach ?></nav>
+
+<?php if ($page === 'admin_dashboard'): ?>
+  <div class="row g-3 mb-4">
+    <div class="col-md-4"><div class="card p-4"><div class="small text-muted">DOCTOR PROFILES</div><div class="metric"><?=count($doctors)?></div></div></div>
+    <div class="col-md-4"><div class="card p-4"><div class="small text-muted">PENDING REVIEWS</div><div class="metric"><?=count(array_filter($doctors, fn(array $d): bool => in_array(($d['verification_status'] ?? 'pending'), ['pending', 'under_review'], true)))?></div></div></div>
+    <div class="col-md-4"><div class="card p-4"><div class="small text-muted">VERIFIED DOCTORS</div><div class="metric"><?=count(array_filter($doctors, fn(array $d): bool => ($d['verification_status'] ?? '') === 'verified'))?></div></div></div>
+  </div>
+  <div class="card p-4"><h2 class="h5">Verification responsibility</h2><p class="mb-0 text-muted">Open Doctor verification to inspect each professional profile, license number, qualification, clinic, and uploaded credential document before changing the status.</p></div>
+<?php else: ?>
+  <div class="d-flex justify-content-between align-items-end mb-4"><div><span class="eyebrow">Professional review queue</span><h1 class="h3 mb-1">Doctor verification</h1><p class="text-muted mb-0">Review all submitted information and the credential file before approval.</p></div><span class="role-chip"><?=count($doctors)?> doctor profile(s)</span></div>
+  <?php if (!$doctors): ?><div class="card p-4 text-muted">No doctor registration requests have been submitted.</div><?php endif ?>
+  <?php foreach ($doctors as $doctor):
+      $status = (string)($doctor['verification_status'] ?? 'pending');
+      $credentialPath = (string)($doctor['credential_path'] ?? ''); ?>
+    <article class="doctor-review-card">
+      <div class="d-flex justify-content-between align-items-start gap-3 mb-3"><div><h2 class="h5 mb-1"><?=h($doctor['full_name'] ?? 'Unnamed doctor')?></h2><div class="small text-muted"><?=h($doctor['email'] ?? '')?></div></div><span class="<?=admin_status_class($status)?>"><?=h(ucwords(str_replace('_', ' ', $status)))?></span></div>
+      <div class="doctor-detail"><dl class="row mb-0"><div class="col-md-4"><dt>Specialization</dt><dd><?=h($doctor['specialization'] ?? $doctor['specialization_other'] ?? 'Not provided')?></dd></div><div class="col-md-4"><dt>Qualification</dt><dd><?=h($doctor['qualification'] ?? 'Not provided')?></dd></div><div class="col-md-4"><dt>Hospital / clinic</dt><dd><?=h($doctor['clinic_name'] ?? 'Not provided')?></dd></div><div class="col-md-4"><dt>License number</dt><dd><?=h($doctor['license_number'] ?? 'Not provided')?></dd></div><div class="col-md-4"><dt>Credential type</dt><dd><?=h($doctor['credential_document_type'] ?? 'Not provided')?></dd></div><div class="col-md-4"><dt>Credential number</dt><dd><?=h($doctor['credential_number'] ?? 'Not provided')?></dd></div><div class="col-md-4"><dt>Issuing institution</dt><dd><?=h($doctor['issuing_institution'] ?? 'Not provided')?></dd></div><div class="col-md-4"><dt>Phone</dt><dd><?=h($doctor['phone'] ?? 'Not provided')?></dd></div><div class="col-md-4"><dt>Address</dt><dd><?=h($doctor['address'] ?? 'Not provided')?></dd></div></dl></div>
+      <div class="d-flex flex-wrap justify-content-between align-items-end gap-3 mt-3"><div><?php if ($credentialPath): ?><a class="btn btn-sm btn-outline-primary" target="_blank" rel="noopener" href="?action=credential_download&doctor_id=<?=urlencode((string)$doctor['id'])?>">Open credential document</a><?php else: ?><span class="text-danger small">No credential document uploaded.</span><?php endif ?><?php if (!empty($doctor['verification_reason'])): ?><div class="small text-muted mt-2">Previous review note: <?=h($doctor['verification_reason'])?></div><?php endif ?></div><form method="post" class="row g-2 align-items-end"><input type="hidden" name="form" value="review_doctor"><input type="hidden" name="doctor_id" value="<?=h($doctor['id'])?>"><div class="col-auto"><label class="form-label small mb-1">Decision</label><select class="form-select form-select-sm" name="verification_status"><option value="pending" <?=$status === 'pending' ? 'selected' : ''?>>Pending</option><option value="under_review" <?=$status === 'under_review' ? 'selected' : ''?>>Under review</option><option value="verified" <?=$status === 'verified' ? 'selected' : ''?>>Verified</option><option value="rejected" <?=$status === 'rejected' ? 'selected' : ''?>>Rejected</option></select></div><div class="col-auto"><label class="form-label small mb-1">Review note</label><input class="form-control form-control-sm" name="verification_reason" placeholder="Optional reason"></div><div class="col-auto"><button class="btn btn-sm btn-primary">Save decision</button></div></form></div>
+    </article>
+  <?php endforeach ?>
+<?php endif ?>
+</div>
+<?php foot();
 }
