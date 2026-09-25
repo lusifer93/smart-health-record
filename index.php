@@ -159,9 +159,9 @@ function extract_prescription(string $image, string $mime): array {
 
     $text = gemini_generate([
         ['text' => $prompt],
-        ['inlineData' => [
-            'mimeType' => $mime,
-            'data' => base64_encode($image),
+        ['inline_data' => [
+           'mime_type' => $mime,
+           'data' => base64_encode($image),
         ]],
     ]);
 
