@@ -70,65 +70,250 @@ if ($form === 'medicine_delete') {
     }
 } catch (Throwable $e) { flash('danger', safe_error_message($e)); redirect('?page=' . urlencode($_POST['return_page'] ?? 'login')); }
 
+function gemini_generate(array $parts): string {
+    $key = env('GEMINI_API_KEY');
+    if ($key === '') {
+        throw new RuntimeException('Gemini AI is not configured. Add GEMINI_API_KEY to .env.');
+    }
+
+    $model = env('GEMINI_MODEL', 'gemini-2.0-flash');
+    $url = 'https://generativelanguage.googleapis.com/v1beta/models/'
+        . rawurlencode($model) . ':generateContent?key=' . rawurlencode($key);
+
+    $payload = [
+        'contents' => [[
+            'role' => 'user',
+            'parts' => $parts,
+        ]],
+        'generationConfig' => [
+            'temperature' => 0.2,
+            'maxOutputTokens' => 800,
+        ],
+    ];
+
+    $ch = curl_init($url);
+    curl_setopt_array($ch, [
+        CURLOPT_POST => true,
+        CURLOPT_POSTFIELDS => json_encode($payload, JSON_THROW_ON_ERROR),
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_HTTPHEADER => ['Content-Type: application/json'],
+        CURLOPT_TIMEOUT => 45,
+    ]);
+
+    $raw = curl_exec($ch);
+    $code = (int) curl_getinfo($ch, CURLINFO_RESPONSE_CODE);
+    $error = curl_error($ch);
+    curl_close($ch);
+
+    $json = json_decode($raw ?: '', true);
+    if ($raw === false || $code >= 400) {
+        throw new RuntimeException(
+            'Gemini AI request failed: ' . ($json['error']['message'] ?? $error ?: 'Unknown error')
+        );
+    }
+
+    $text = $json['candidates'][0]['content']['parts'][0]['text'] ?? '';
+    if (!is_string($text) || trim($text) === '') {
+        throw new RuntimeException('Gemini AI did not return a usable response.');
+    }
+
+    return trim($text);
+}
+
 function report_text(array $metrics): string {
-    $facts = array_map(fn($m)=>$m['metric_type'].': '.$m['value'].' '.$m['unit'].' ('.date('d M', strtotime($m['measured_at'])).')',$metrics);
-    $fallback = "• Your latest measurements are recorded and ready to review.\n• Recent values: " . ($facts ? implode('; ', $facts) : 'no measurements yet') . ".\n• This is an information summary, not a diagnosis. Speak with a clinician if something worries you.";
-    if (!env('OPENAI_API_KEY') || !$metrics) return $fallback;
-    $ch=curl_init('https://api.openai.com/v1/responses'); $payload=['model'=>env('OPENAI_MODEL','gpt-4.1-mini'),'input'=>'Return exactly three short bullet points in plain language about these patient health metrics. Each line must start with •. Do not diagnose, do not use medical jargon, and finish with a clear not-medical-advice note: '.implode('; ',$facts)]; curl_setopt_array($ch,[CURLOPT_POST=>true,CURLOPT_POSTFIELDS=>json_encode($payload),CURLOPT_RETURNTRANSFER=>true,CURLOPT_HTTPHEADER=>['Authorization: Bearer '.env('OPENAI_API_KEY'),'Content-Type: application/json'],CURLOPT_TIMEOUT=>30]); $raw=curl_exec($ch); curl_close($ch); $json=json_decode($raw ?: '',true); return $json['output'][0]['content'][0]['text'] ?? $fallback;
+    $facts = array_map(
+        fn($m) => $m['metric_type'] . ': ' . $m['value'] . ' ' . $m['unit']
+            . ' (' . date('d M', strtotime($m['measured_at'])) . ')',
+        $metrics
+    );
+
+    $fallback = "• Your latest measurements are recorded and ready to review.\n"
+        . "• Recent values: " . ($facts ? implode('; ', $facts) : 'no measurements yet') . ".\n"
+        . "• This is informational only, not medical advice. Speak with a clinician if you are concerned.";
+
+    if (!$metrics || env('GEMINI_API_KEY') === '') {
+        return $fallback;
+    }
+
+    try {
+        return gemini_generate([[
+            'text' => "Return exactly three short bullet points in plain language about these health measurements. "
+                . "Each line must start with •. Do not diagnose, do not use difficult medical words, and end with a "
+                . "clear statement that this is not medical advice.\n\nMeasurements:\n" . implode("\n", $facts),
+        ]]);
+    } catch (Throwable $e) {
+        error_log('[CareNest Gemini report] ' . $e->getMessage());
+        return $fallback;
+    }
+}
+
+function extract_prescription(string $image, string $mime): array {
+    if (env('GEMINI_API_KEY') === '') {
+        throw new RuntimeException('AI prescription scanning is not configured yet.');
+    }
+
+    $prompt = 'Read this prescription image. Return only valid JSON with no markdown. '
+        . 'Return an array of objects, each with string fields: name, dosage, frequency. '
+        . 'Extract only text clearly visible. If uncertain, use "Needs verification". '
+        . 'This is transcription only, not medical advice.';
+
+    $text = gemini_generate([
+        ['text' => $prompt],
+        ['inlineData' => [
+            'mimeType' => $mime,
+            'data' => base64_encode($image),
+        ]],
+    ]);
+
+    $text = preg_replace('/^```(?:json)?\s*|\s*```$/i', '', trim($text));
+    $items = json_decode($text, true);
+
+    if (!is_array($items)) {
+        throw new RuntimeException(
+            'The prescription could not be read clearly. Try a brighter photo or enter medicines manually.'
+        );
+    }
+
+    return array_values(array_filter(
+        $items,
+        fn($item) => is_array($item) && !empty($item['name'])
+    ));
 }
 
 function validate_prescription_upload(array $file): void {
-    if (($file['error'] ?? UPLOAD_ERR_NO_FILE) !== UPLOAD_ERR_OK || empty($file['tmp_name'])) throw new RuntimeException('Choose a clear prescription image to scan.');
-    if (($file['size'] ?? 0) < 1 || $file['size'] > 5 * 1024 * 1024) throw new RuntimeException('Prescription images must be between 1 byte and 5 MB.');
-    $mime=(new finfo(FILEINFO_MIME_TYPE))->file((string)$file['tmp_name']);
-    if (!in_array($mime,['image/jpeg','image/png','image/webp'],true)) throw new RuntimeException('For prescription scanning, upload a JPG, PNG or WEBP image.');
+    if (($file['error'] ?? UPLOAD_ERR_NO_FILE) !== UPLOAD_ERR_OK || empty($file['tmp_name'])) {
+        throw new RuntimeException('Choose a clear prescription image to scan.');
+    }
+
+    if (($file['size'] ?? 0) < 1 || $file['size'] > 5 * 1024 * 1024) {
+        throw new RuntimeException('Prescription images must be between 1 byte and 5 MB.');
+    }
+
+    $mime = (new finfo(FILEINFO_MIME_TYPE))->file((string) $file['tmp_name']);
+    if (!in_array($mime, ['image/jpeg', 'image/png', 'image/webp'], true)) {
+        throw new RuntimeException('For prescription scanning, upload a JPG, PNG or WEBP image.');
+    }
 }
 
 function validated_medical_upload(array $file): array {
-    if (($file['error'] ?? UPLOAD_ERR_NO_FILE) !== UPLOAD_ERR_OK || empty($file['tmp_name'])) throw new RuntimeException('Choose a medical file to upload.');
-    if (($file['size'] ?? 0) < 1 || $file['size'] > 5 * 1024 * 1024) throw new RuntimeException('Medical files must be 5 MB or smaller.');
-    $mime=(new finfo(FILEINFO_MIME_TYPE))->file((string)$file['tmp_name']);
-    $extensions=['application/pdf'=>'pdf','image/jpeg'=>'jpg','image/png'=>'png','image/webp'=>'webp'];
-    if (!isset($extensions[$mime])) throw new RuntimeException('Upload a PDF, JPG, PNG or WEBP file.');
-    $originalName=preg_replace('/[^A-Za-z0-9._ -]/','_',basename((string)($file['name'] ?? 'medical-file')));
-    $givenExtension=strtolower((string)pathinfo($originalName, PATHINFO_EXTENSION));
-    $allowedExtensions=['application/pdf'=>['pdf'],'image/jpeg'=>['jpg','jpeg'],'image/png'=>['png'],'image/webp'=>['webp']];
-    if (!in_array($givenExtension,$allowedExtensions[$mime],true)) throw new RuntimeException('The file extension does not match its actual file type.');
-    return ['tmp_name'=>(string)$file['tmp_name'],'mime'=>$mime,'extension'=>$extensions[$mime],'display_name'=>$originalName,'size'=>(int)$file['size']];
+    if (($file['error'] ?? UPLOAD_ERR_NO_FILE) !== UPLOAD_ERR_OK || empty($file['tmp_name'])) {
+        throw new RuntimeException('Choose a medical file to upload.');
+    }
+
+    if (($file['size'] ?? 0) < 1 || $file['size'] > 5 * 1024 * 1024) {
+        throw new RuntimeException('Medical files must be 5 MB or smaller.');
+    }
+
+    $mime = (new finfo(FILEINFO_MIME_TYPE))->file((string) $file['tmp_name']);
+    $extensions = [
+        'application/pdf' => 'pdf',
+        'image/jpeg' => 'jpg',
+        'image/png' => 'png',
+        'image/webp' => 'webp',
+    ];
+
+    if (!isset($extensions[$mime])) {
+        throw new RuntimeException('Upload a PDF, JPG, PNG or WEBP file.');
+    }
+
+    $originalName = preg_replace(
+        '/[^A-Za-z0-9._ -]/',
+        '_',
+        basename((string) ($file['name'] ?? 'medical-file'))
+    );
+
+    $givenExtension = strtolower((string) pathinfo($originalName, PATHINFO_EXTENSION));
+    $allowedExtensions = [
+        'application/pdf' => ['pdf'],
+        'image/jpeg' => ['jpg', 'jpeg'],
+        'image/png' => ['png'],
+        'image/webp' => ['webp'],
+    ];
+
+    if (!in_array($givenExtension, $allowedExtensions[$mime], true)) {
+        throw new RuntimeException('The file extension does not match its actual file type.');
+    }
+
+    return [
+        'tmp_name' => (string) $file['tmp_name'],
+        'mime' => $mime,
+        'extension' => $extensions[$mime],
+        'display_name' => $originalName,
+        'size' => (int) $file['size'],
+    ];
 }
 
-function store_medical_record(Supabase $sb, string $patientId, array $file, string $title, string $recordType): array {
-    $upload=validated_medical_upload($file);
-    if ($recordType === 'prescription' && !str_starts_with($upload['mime'],'image/')) throw new RuntimeException('Prescription scanning requires a JPG, PNG or WEBP image.');
-    $path=$patientId.'/'.$recordType.'/'.bin2hex(random_bytes(24)).'.'.$upload['extension'];
-    $sb->storageUpload($path,(string)file_get_contents($upload['tmp_name']),$upload['mime']);
-    $safeTitle=$title !== '' ? $title : $upload['display_name'];
-    $sb->db('POST','medical_records','', [[
-        'patient_id'=>$patientId,'owner_id'=>$patientId,'title'=>$safeTitle,'record_title'=>$safeTitle,'record_type'=>$recordType,
-        'file_path'=>$path,'file_type'=>$upload['mime'],'mime_type'=>$upload['mime'],'file_size'=>$upload['size'],
-        'original_file_name'=>$upload['display_name'],'processing_status'=>'stored',
+function store_medical_record(
+    Supabase $sb,
+    string $patientId,
+    array $file,
+    string $title,
+    string $recordType
+): array {
+    $upload = validated_medical_upload($file);
+
+    if ($recordType === 'prescription' && !str_starts_with($upload['mime'], 'image/')) {
+        throw new RuntimeException('Prescription scanning requires a JPG, PNG or WEBP image.');
+    }
+
+    $path = $patientId . '/' . $recordType . '/' . bin2hex(random_bytes(24)) . '.' . $upload['extension'];
+
+    $sb->storageUpload(
+        $path,
+        (string) file_get_contents($upload['tmp_name']),
+        $upload['mime']
+    );
+
+    $safeTitle = $title !== '' ? $title : $upload['display_name'];
+
+    $sb->db('POST', 'medical_records', '', [[
+        'patient_id' => $patientId,
+        'owner_id' => $patientId,
+        'title' => $safeTitle,
+        'record_title' => $safeTitle,
+        'record_type' => $recordType,
+        'file_path' => $path,
+        'file_type' => $upload['mime'],
+        'mime_type' => $upload['mime'],
+        'file_size' => $upload['size'],
+        'original_file_name' => $upload['display_name'],
+        'processing_status' => 'stored',
     ]]);
+
     return $upload;
 }
 
 function authorised_medical_record(Supabase $sb, string $id): array {
-    if (!ctype_digit($id)) throw new RuntimeException('Invalid medical record selected.');
-    $rows=$sb->db('GET','medical_records','?select=*&id=eq.'.rawurlencode($id).'&limit=1');
-    $record=$rows[0] ?? null;
-    if (!$record) throw new RuntimeException('Record not found or access is not permitted.');
-    $userId=(string)user()['id']; $role=current_role(); $patientId=(string)($record['patient_id'] ?? '');
-    $allowed=$role === 'patient' && hash_equals($patientId,$userId);
-    if (!$allowed && $role === 'doctor') $allowed=doctor_patient_access($sb,$userId,$patientId);
-    if (!$allowed) throw new RuntimeException('Record access is not permitted.');
-    return $record;
-}
+    if (!ctype_digit($id)) {
+        throw new RuntimeException('Invalid medical record selected.');
+    }
 
-function extract_prescription(string $image, string $mime): array {
-    if (!env('OPENAI_API_KEY')) throw new RuntimeException('AI prescription scanning is not configured yet. Add medicines manually or ask the administrator to enable scanning.');
-    if (!env('OPENAI_API_KEY')) throw new RuntimeException('Prescription scan needs an OpenAI API key in .env. Add it only on the server; never paste it into the website.');
-    $data='data:'.$mime.';base64,'.base64_encode($image); $prompt='Read this prescription image. Return only valid JSON: an array of objects with string fields name, dosage, frequency. Extract only text that is clearly visible. If unsure, use "Needs verification". This is transcription, not medical advice.';
-    $payload=['model'=>env('OPENAI_MODEL','gpt-4.1-mini'),'input'=>[['role'=>'user','content'=>[['type'=>'input_text','text'=>$prompt],['type'=>'input_image','image_url'=>$data]]]]];
-    $ch=curl_init('https://api.openai.com/v1/responses'); curl_setopt_array($ch,[CURLOPT_POST=>true,CURLOPT_POSTFIELDS=>json_encode($payload),CURLOPT_RETURNTRANSFER=>true,CURLOPT_HTTPHEADER=>['Authorization: Bearer '.env('OPENAI_API_KEY'),'Content-Type: application/json'],CURLOPT_TIMEOUT=>45]); $raw=curl_exec($ch); curl_close($ch); $json=json_decode($raw ?: '',true); $text=$json['output'][0]['content'][0]['text'] ?? ''; $text=preg_replace('/^```(?:json)?|```$/m','',trim($text)); $items=json_decode($text,true); if(!is_array($items)) throw new RuntimeException('The prescription could not be read clearly. Try a brighter photo or enter the medicine manually.'); return array_values(array_filter($items,fn($i)=>is_array($i)&&!empty($i['name'])));
+    $rows = $sb->db(
+        'GET',
+        'medical_records',
+        '?select=*&id=eq.' . rawurlencode($id) . '&limit=1'
+    );
+
+    $record = $rows[0] ?? null;
+    if (!$record) {
+        throw new RuntimeException('Record not found or access is not permitted.');
+    }
+
+    $userId = (string) user()['id'];
+    $role = current_role();
+    $patientId = (string) ($record['patient_id'] ?? '');
+
+    $allowed = $role === 'patient' && hash_equals($patientId, $userId);
+
+    if (!$allowed && $role === 'doctor') {
+        $allowed = doctor_patient_access($sb, $userId, $patientId);
+    }
+
+    if (!$allowed) {
+        throw new RuntimeException('Record access is not permitted.');
+    }
+
+    return $record;
 }
 
 $page = $_GET['page'] ?? (user() ? 'dashboard' : 'login');
