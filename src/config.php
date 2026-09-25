@@ -22,6 +22,11 @@ function safe_error_message(Throwable $error): string {
     error_log('[CareNest] '.$error->getMessage());
     $message=$error->getMessage();
     if (str_contains(strtolower($message), 'invalid login')) return 'Email or password is incorrect.';
-    if (preg_match('/^(Choose|Enter|Please|For prescription|The prescription|No authorised|This patient|Medicine|Files|File upload|AI prescription)/i',$message)) return $message;
+   if (preg_match(
+    '/^(Choose|Enter|Please|For prescription|The prescription|No authorised|This patient|Medicine|Files|File upload|AI prescription|Gemini)/i',
+    $message
+)) {
+    return $message;
+}
     return 'We could not complete that request. Please try again.';
 }

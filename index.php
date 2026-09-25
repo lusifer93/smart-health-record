@@ -63,22 +63,66 @@ if ($form === 'medicine_delete') {
 }        if ($form === 'appointment') { $sb->db('POST','appointments','', [['patient_id'=>$uid,'scheduled_at'=>date('c',strtotime($_POST['scheduled_at'])),'reason'=>trim($_POST['reason'])]]); flash('success','Appointment saved.'); }
         if ($form === 'appointment_request') { $doctorId=(string)($_POST['doctor_id'] ?? ''); $when=(string)($_POST['preferred_at'] ?? ''); if (!preg_match('/^[0-9a-f-]{36}$/i',$doctorId) || strtotime($when) === false) throw new RuntimeException('Choose a doctor and a valid preferred date/time.'); $sb->rpc('carenest_request_appointment',['target_doctor'=>$doctorId,'preferred_at'=>date('c',strtotime($when)),'request_reason'=>trim((string)($_POST['reason'] ?? ''))]); flash('success','Appointment request sent to the doctor.'); }
         if ($form === 'record') { store_medical_record($sb, $uid, $_FILES['file'] ?? [], trim((string)($_POST['title'] ?? '')), 'medical_report'); flash('success','Medical record uploaded securely.'); }
-        if ($form === 'prescription_scan') { $stored=store_medical_record($sb, $uid, $_FILES['prescription'] ?? [], 'Prescription · '.date('d M Y'), 'prescription'); $items=extract_prescription((string)file_get_contents($stored['tmp_name']),$stored['mime']); foreach($items as $item) $sb->db('POST','medicines','', [['patient_id'=>$uid,'medicine_name'=>$item['name'],'name'=>$item['name'],'dosage'=>$item['dosage'],'frequency'=>$item['frequency'],'notes'=>'Extracted from prescription — please verify with your clinician.']]); flash('success','Prescription saved securely and '.count($items).' medicine(s) extracted. Please check every name and dose before relying on it.'); }
+        if ($form === 'prescription_scan') {
+    $upload = $_FILES['prescription'] ?? [];
+
+    validate_prescription_upload($upload);
+
+    $image = file_get_contents((string)$upload['tmp_name']);
+
+    if ($image === false || $image === '') {
+        throw new RuntimeException('The prescription image could not be read.');
+    }
+
+    $mime = (new finfo(FILEINFO_MIME_TYPE))
+        ->file((string)$upload['tmp_name']);
+
+    $items = extract_prescription($image, $mime);
+
+    $stored = store_medical_record(
+        $sb,
+        $uid,
+        $upload,
+        'Prescription · ' . date('d M Y'),
+        'prescription'
+    );
+
+    foreach ($items as $item) {
+        $sb->db('POST', 'medicines', '', [[
+            'patient_id' => $uid,
+            'name' => $item['name'],
+            'dosage' => $item['dosage'],
+            'frequency' => $item['frequency'],
+            'notes' => 'Extracted from prescription — verify with your clinician.',
+        ]]);
+    }
+
+    flash(
+        'success',
+        'Prescription saved securely and ' . count($items)
+        . ' medicine(s) extracted. Verify every name and dose with your clinician.'
+    );
+}
         if ($form === 'share') { $doctors = $sb->db('GET','profiles','?select=id,role&email=eq.' . rawurlencode(trim($_POST['doctor_email']))); if (!$doctors || $doctors[0]['role'] !== 'doctor') throw new RuntimeException('No authorised doctor profile was found for that email.'); $sb->db('POST','record_sharing','?on_conflict=patient_id,doctor_id', [['patient_id'=>$uid,'doctor_id'=>$doctors[0]['id'],'expires_at'=>$_POST['expires_at'] ? date('c',strtotime($_POST['expires_at'])) : null]]); flash('success','Access shared with the doctor.'); }
         if ($form === 'report') { $metrics = $sb->db('GET','health_metrics','?select=metric_type,value,unit,measured_at&patient_id=eq.' . $uid . '&order=measured_at.desc&limit=20'); $text = report_text($metrics); $sb->db('POST','ai_reports','', [['patient_id'=>$uid,'report_text'=>$text]]); flash('success','A new health summary was saved.'); }
         redirect('?page=' . urlencode($_POST['return_page'] ?? 'dashboard'));
     }
 } catch (Throwable $e) { flash('danger', safe_error_message($e)); redirect('?page=' . urlencode($_POST['return_page'] ?? 'login')); }
 
-function gemini_generate(array $parts): string {
-    $key = env('GEMINI_API_KEY');
+function gemini_generate(array $parts): string
+{
+    $key = trim(env('GEMINI_API_KEY'));
     if ($key === '') {
-        throw new RuntimeException('Gemini AI is not configured. Add GEMINI_API_KEY to .env.');
+        throw new RuntimeException(
+            'Gemini AI is not configured. Add GEMINI_API_KEY to .env.'
+        );
     }
 
-    $model = env('GEMINI_MODEL', 'gemini-2.0-flash');
+    $model = trim(env('GEMINI_MODEL', 'gemini-2.0-flash'));
     $url = 'https://generativelanguage.googleapis.com/v1beta/models/'
-        . rawurlencode($model) . ':generateContent?key=' . rawurlencode($key);
+        . rawurlencode($model)
+        . ':generateContent?key='
+        . rawurlencode($key);
 
     $payload = [
         'contents' => [[
@@ -91,34 +135,63 @@ function gemini_generate(array $parts): string {
         ],
     ];
 
+    $jsonPayload = json_encode($payload, JSON_THROW_ON_ERROR);
+
     $ch = curl_init($url);
+    if ($ch === false) {
+        throw new RuntimeException('Could not initialize the Gemini request.');
+    }
+
     curl_setopt_array($ch, [
         CURLOPT_POST => true,
-        CURLOPT_POSTFIELDS => json_encode($payload, JSON_THROW_ON_ERROR),
+        CURLOPT_POSTFIELDS => $jsonPayload,
         CURLOPT_RETURNTRANSFER => true,
-        CURLOPT_HTTPHEADER => ['Content-Type: application/json'],
-        CURLOPT_TIMEOUT => 45,
+        CURLOPT_HTTPHEADER => [
+            'Content-Type: application/json',
+            'Accept: application/json',
+        ],
+        CURLOPT_CONNECTTIMEOUT => 15,
+        CURLOPT_TIMEOUT => 60,
     ]);
 
     $raw = curl_exec($ch);
-    $code = (int) curl_getinfo($ch, CURLINFO_RESPONSE_CODE);
-    $error = curl_error($ch);
+    $curlError = curl_error($ch);
+    $httpCode = (int) curl_getinfo($ch, CURLINFO_RESPONSE_CODE);
     curl_close($ch);
 
-    $json = json_decode($raw ?: '', true);
-    if ($raw === false || $code >= 400) {
+    if ($raw === false) {
         throw new RuntimeException(
-            'Gemini AI request failed: ' . ($json['error']['message'] ?? $error ?: 'Unknown error')
+            'Gemini connection failed: ' . ($curlError ?: 'Unknown cURL error.')
         );
     }
 
-    $text = $json['candidates'][0]['content']['parts'][0]['text'] ?? '';
+    $response = json_decode($raw, true);
+
+    if ($httpCode < 200 || $httpCode >= 300) {
+        $message = is_array($response)
+            ? (string)($response['error']['message'] ?? '')
+            : '';
+
+        throw new RuntimeException(
+            'Gemini request failed with HTTP ' . $httpCode . ': '
+            . ($message !== '' ? $message : 'Unknown Gemini API error.')
+        );
+    }
+
+    $text = $response['candidates'][0]['content']['parts'][0]['text'] ?? '';
+
     if (!is_string($text) || trim($text) === '') {
-        throw new RuntimeException('Gemini AI did not return a usable response.');
+        $finishReason = $response['candidates'][0]['finishReason'] ?? 'unknown';
+
+        throw new RuntimeException(
+            'Gemini returned no usable text. Finish reason: ' . $finishReason
+        );
     }
 
     return trim($text);
 }
+  
+
 
 function report_text(array $metrics): string {
     $facts = array_map(
@@ -147,37 +220,100 @@ function report_text(array $metrics): string {
     }
 }
 
-function extract_prescription(string $image, string $mime): array {
-    if (env('GEMINI_API_KEY') === '') {
-        throw new RuntimeException('AI prescription scanning is not configured yet.');
-    }
 
-    $prompt = 'Read this prescription image. Return only valid JSON with no markdown. '
-        . 'Return an array of objects, each with string fields: name, dosage, frequency. '
-        . 'Extract only text clearly visible. If uncertain, use "Needs verification". '
-        . 'This is transcription only, not medical advice.';
 
-    $text = gemini_generate([
-        ['text' => $prompt],
-        ['inline_data' => [
-           'mime_type' => $mime,
-           'data' => base64_encode($image),
-        ]],
-    ]);
-
-    $text = preg_replace('/^```(?:json)?\s*|\s*```$/i', '', trim($text));
-    $items = json_decode($text, true);
-
-    if (!is_array($items)) {
+function extract_prescription(string $image, string $mime): array
+{
+    if (trim(env('GEMINI_API_KEY')) === '') {
         throw new RuntimeException(
-            'The prescription could not be read clearly. Try a brighter photo or enter medicines manually.'
+            'AI prescription scanning is not configured. Add GEMINI_API_KEY to .env.'
         );
     }
 
-    return array_values(array_filter(
-        $items,
-        fn($item) => is_array($item) && !empty($item['name'])
-    ));
+    if ($image === '') {
+        throw new RuntimeException('The uploaded prescription image is empty.');
+    }
+
+    $allowedMimes = [
+        'image/jpeg',
+        'image/png',
+        'image/webp',
+    ];
+
+    if (!in_array($mime, $allowedMimes, true)) {
+        throw new RuntimeException(
+            'Prescription scanning requires a JPG, PNG, or WEBP image.'
+        );
+    }
+
+    $prompt = <<<'PROMPT'
+Read this prescription image.
+
+Return only valid JSON. Do not use markdown or code fences.
+
+The response must be a JSON array. Each item must contain exactly these
+string fields:
+- name
+- dosage
+- frequency
+
+Extract only text that is clearly visible. If a value cannot be read,
+return "Needs verification".
+
+This is transcription only, not medical advice.
+PROMPT;
+
+    $text = gemini_generate([
+        [
+            'text' => $prompt,
+        ],
+        [
+            // Gemini REST API uses these camelCase field names.
+            'inlineData' => [
+                'mimeType' => $mime,
+                'data' => base64_encode($image),
+            ],
+        ],
+    ]);
+
+    $text = trim($text);
+
+    // Remove a possible ```json ... ``` wrapper.
+    $text = preg_replace(
+        '/^\s*```(?:json)?\s*|\s*```\s*$/i',
+        '',
+        $text
+    );
+
+    $items = json_decode(trim($text), true);
+
+    if (!is_array($items)) {
+        throw new RuntimeException(
+            'Gemini returned invalid prescription data. Try a clearer image.'
+        );
+    }
+
+    $result = [];
+
+    foreach ($items as $item) {
+        if (!is_array($item)) {
+            continue;
+        }
+
+        $name = trim((string)($item['name'] ?? ''));
+
+        if ($name === '') {
+            continue;
+        }
+
+        $result[] = [
+            'name' => $name,
+            'dosage' => trim((string)($item['dosage'] ?? 'Needs verification')),
+            'frequency' => trim((string)($item['frequency'] ?? 'Needs verification')),
+        ];
+    }
+
+    return $result;
 }
 
 function validate_prescription_upload(array $file): void {
